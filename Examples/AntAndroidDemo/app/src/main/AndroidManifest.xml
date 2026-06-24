@@ -14,6 +14,15 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- WalletConnect spike: deep link the wallet uses to return to us
+                 after signing. Must match the `redirect` in
+                 WalletConnectManager.configure (antdemo-wc://request). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="antdemo-wc" android:host="request" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>

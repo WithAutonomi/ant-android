@@ -83,6 +83,50 @@ adb shell am start -n com.autonomi.examples.antdemo/.MainActivity
 - **Download**: paste any chunk address (or tap "Use last") and pull
   the content back as text.
 
+## WalletConnect spike
+
+An exploratory spike (`app/.../wallet/`) wiring an external self-custody
+wallet via **Reown AppKit** (successor to Web3Modal — same stack family as
+the desktop app). The app never holds a private key: it builds the transaction
+and the user's wallet signs it. Store-policy-safe payment model; Kotlin mirror
+of the iOS spike (`ant-swift` AntSwiftDemo) and of `ant-ui/utils/payment.ts`.
+Tracked in Linear **V2-531**.
+
+**What the spike proves:** Connect Wallet → wallet signs a real
+`eth_sendTransaction` → tx hash. The tx is an ERC-20 `approve` of the Autonomi
+payment vault (the desktop's first payment step). With approve amount `0` it
+costs only gas — **no token balance needed**.
+
+**Why a real device shines here:** unlike the iOS *simulator*, a physical
+Android device runs MetaMask/Trust, so it completes the signature
+**end-to-end**. The approve tx targets Arbitrum, so **no devnet is needed** for
+the wallet test — just internet + a wallet.
+
+**Not yet a paid upload** — that needs the external-signer prepare/finalize
+surface in `ant-ffi` (Linear **V2-391**). `EthCalldata.payForQuotes(...)` is
+already implemented here for that next step.
+
+### Running the spike
+
+1. Get a WalletConnect project id from <https://dashboard.reown.com> and set
+   `REOWN_PROJECT_ID` in `MainActivity.kt`.
+2. `./gradlew :app:installDebug` on a **physical device** with a wallet app
+   installed.
+3. Tap **Connect Wallet**, approve in the wallet, then **Send test approve
+   tx**. Needs a little ETH on Arbitrum One for gas; for a no-real-funds run,
+   fill in the Arbitrum **Sepolia** token/vault addresses in
+   `AutonomiContracts.kt` and target `ARBITRUM_SEPOLIA`.
+
+### Known unknowns (verify in Android Studio)
+
+Not yet compiled. The Reown AppKit Android surface in
+`wallet/WalletConnectManager.kt` (init params, `setChains`, the
+`ModalDelegate` method set, `AppKit.request`/`getAccount` shapes) and the
+Compose modal host (`AppKitComponent` vs a navigation host) are written
+against the docs + the WalletConnect Android lineage and **need verification
+against the resolved `com.reown:appkit` 1.4.x**. These are the spots most
+likely to need adjustment.
+
 ## Real-device notes
 
 A real Android device on the same LAN as your dev machine bypasses
