@@ -15,7 +15,7 @@ class MainActivity : ComponentActivity() {
         WalletConnectManager.configure(application, REOWN_PROJECT_ID)
         setContent {
             MaterialTheme {
-                Surface { MainScreen() }
+                Surface { AppRoot() }
             }
         }
     }

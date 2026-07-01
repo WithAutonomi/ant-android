@@ -6,14 +6,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.ModalBottomSheetValue
+import androidx.compose.material.navigation.BottomSheetNavigator
+import androidx.compose.material.navigation.ModalBottomSheetLayout
+import androidx.compose.material.rememberModalBottomSheetState
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -24,14 +26,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import com.autonomi.examples.antdemo.wallet.AutonomiChain
 import com.autonomi.examples.antdemo.wallet.WalletConnectManager
-import com.reown.appkit.ui.AppKitComponent
+import com.reown.appkit.ui.appKitGraph
+import com.reown.appkit.ui.components.button.Web3Button
+import com.reown.appkit.ui.components.button.rememberAppKitState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.ant_ffi.Client
-import java.io.File
 import kotlin.random.Random
 
 /// Path the rewritten devnet manifest is pushed to on the emulator:
@@ -39,9 +46,26 @@ import kotlin.random.Random
 /// See README for the rewrite step (127.0.0.1 -> 10.0.2.2).
 private const val MANIFEST_PATH = "/data/local/tmp/devnet-manifest.json"
 
-@OptIn(ExperimentalMaterial3Api::class)
+/// App root: hosts the nav graph the Reown AppKit modal plugs into. The modal
+/// is presented as a bottom sheet, so the NavHost needs a BottomSheetNavigator
+/// and a ModalBottomSheetLayout wrapper (mirrors Reown's `sample/modal`).
+@OptIn(ExperimentalMaterialApi::class)
 @Composable
-fun MainScreen() {
+fun AppRoot() {
+    val sheetState = rememberModalBottomSheetState(ModalBottomSheetValue.Hidden, skipHalfExpanded = true)
+    val bottomSheetNavigator = remember { BottomSheetNavigator(sheetState) }
+    val navController = rememberNavController(bottomSheetNavigator)
+
+    ModalBottomSheetLayout(bottomSheetNavigator = bottomSheetNavigator) {
+        NavHost(navController = navController, startDestination = "home") {
+            composable("home") { MainScreen(navController) }
+            appKitGraph(navController)
+        }
+    }
+}
+
+@Composable
+fun MainScreen(navController: NavController) {
     var inputText by remember { mutableStateOf("hello autonomi") }
     var addressInput by remember { mutableStateOf("") }
     var lastUploadedAddress by remember { mutableStateOf("") }
@@ -52,8 +76,7 @@ fun MainScreen() {
 
     // WalletConnect spike state.
     val wallet by WalletConnectManager.state.collectAsState()
-    var showWalletSheet by remember { mutableStateOf(false) }
-    val sheetState = rememberModalBottomSheetState()
+    val appKitState = rememberAppKitState(navController = navController)
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -141,28 +164,20 @@ fun MainScreen() {
         }
 
         // ---- WalletConnect spike ----
-        // Connect an external wallet and have it sign a real Autonomi payment-
-        // vault `approve` (amount 0 → gas only, no balance needed). Proves the
-        // external-signer path before the FFI prepare/finalize surface (V2-391)
-        // makes it a full paid upload. On a physical device this completes the
-        // signature end-to-end with MetaMask/Trust.
+        // Web3Button handles connect + account display (opening the AppKit modal
+        // via appKitGraph). Once connected, "Send test approve tx" has the wallet
+        // sign a real payment-vault `approve` (amount 0 → gas only, no balance).
+        // On a physical device this completes the signature end-to-end.
         Text("Wallet (WalletConnect spike)", style = MaterialTheme.typography.titleSmall)
+        Web3Button(state = appKitState)
         if (wallet.address != null) {
-            SelectionContainer {
-                Text(
-                    "Connected: ${wallet.address}",
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            Text("Chain: ${wallet.chainCaip2 ?: "?"}", style = MaterialTheme.typography.bodySmall)
+            Text("Chain: ${wallet.chainId ?: "?"}", style = MaterialTheme.typography.bodySmall)
             Button(
                 enabled = !busy,
                 onClick = {
                     scope.launch {
                         busy = true
                         try {
-                            // amount "0": real signed tx, only gas.
                             WalletConnectManager.sendApprove(AutonomiChain.ARBITRUM_ONE, "0")
                         } catch (e: Throwable) {
                             status = "Approve failed: ${e.message}"
@@ -170,8 +185,6 @@ fun MainScreen() {
                     }
                 }
             ) { Text("Send test approve tx (Arbitrum One)") }
-        } else {
-            Button(onClick = { showWalletSheet = true }) { Text("Connect Wallet") }
         }
         wallet.lastTxHash?.let { hash ->
             SelectionContainer {
@@ -182,21 +195,5 @@ fun MainScreen() {
         Text(status, style = MaterialTheme.typography.bodySmall)
         Text(wallet.status, style = MaterialTheme.typography.bodySmall)
         if (busy) { CircularProgressIndicator() }
-    }
-
-    // Reown connect modal. NOTE(spike): `AppKitComponent` is the documented
-    // Compose entry point; depending on the resolved SDK the modal may instead
-    // want a navigation host (`navController.openAppKit(...)` + `appKitGraph`).
-    // Verify against the Reown sample if this doesn't present correctly.
-    if (showWalletSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showWalletSheet = false },
-            sheetState = sheetState,
-        ) {
-            AppKitComponent(
-                shouldOpenChooseNetwork = true,
-                closeModal = { showWalletSheet = false },
-            )
-        }
     }
 }
