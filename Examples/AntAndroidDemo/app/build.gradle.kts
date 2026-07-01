@@ -53,10 +53,11 @@ dependencies {
     // `appKitGraph` into a NavHost that uses a bottom-sheet navigator
     // (androidx.compose.material.navigation, versioned by the Compose BOM).
     implementation("androidx.navigation:navigation-compose:2.8.0")
-    // material-navigation isn't in the Compose BOM 2024.09.02. Earliest stable
-    // in the 1.7 line is 1.7.6 (there is no 1.7.1). Provides BottomSheetNavigator
-    // + the navigator-aware ModalBottomSheetLayout used to host the AppKit modal.
-    // Gradle aligns `material` up to 1.7.6 transitively, which is fine.
-    implementation("androidx.compose.material:material-navigation:1.7.6")
+    // AppKit's `appKitGraph` (appkit 1.4.1) hosts the modal via ACCOMPANIST's
+    // navigation-material `bottomSheet {}`, so the NavController must register
+    // Accompanist's BottomSheetNavigator (not the newer androidx
+    // material-navigation one — appkit's `develop` sample uses that, but the
+    // 1.4.1 release still uses accompanist). Pin the exact version appkit pulls.
+    implementation("com.google.accompanist:accompanist-navigation-material:0.34.0")
     implementation("androidx.compose.material:material")
 }

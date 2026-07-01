@@ -6,11 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.ExperimentalMaterialApi
-import androidx.compose.material.ModalBottomSheetValue
-import androidx.compose.material.navigation.BottomSheetNavigator
-import androidx.compose.material.navigation.ModalBottomSheetLayout
-import androidx.compose.material.rememberModalBottomSheetState
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +27,9 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.autonomi.examples.antdemo.wallet.AutonomiChain
 import com.autonomi.examples.antdemo.wallet.WalletConnectManager
+import com.google.accompanist.navigation.material.ExperimentalMaterialNavigationApi
+import com.google.accompanist.navigation.material.ModalBottomSheetLayout
+import com.google.accompanist.navigation.material.rememberBottomSheetNavigator
 import com.reown.appkit.ui.appKitGraph
 import com.reown.appkit.ui.components.button.Web3Button
 import com.reown.appkit.ui.components.button.rememberAppKitState
@@ -46,14 +44,14 @@ import kotlin.random.Random
 /// See README for the rewrite step (127.0.0.1 -> 10.0.2.2).
 private const val MANIFEST_PATH = "/data/local/tmp/devnet-manifest.json"
 
-/// App root: hosts the nav graph the Reown AppKit modal plugs into. The modal
-/// is presented as a bottom sheet, so the NavHost needs a BottomSheetNavigator
-/// and a ModalBottomSheetLayout wrapper (mirrors Reown's `sample/modal`).
-@OptIn(ExperimentalMaterialApi::class)
+/// App root: hosts the nav graph the Reown AppKit modal plugs into. appkit
+/// 1.4.1's `appKitGraph` presents the modal via Accompanist's bottom-sheet
+/// navigation, so the NavController must register Accompanist's
+/// BottomSheetNavigator and be wrapped in its ModalBottomSheetLayout.
+@OptIn(ExperimentalMaterialNavigationApi::class)
 @Composable
 fun AppRoot() {
-    val sheetState = rememberModalBottomSheetState(ModalBottomSheetValue.Hidden, skipHalfExpanded = true)
-    val bottomSheetNavigator = remember { BottomSheetNavigator(sheetState) }
+    val bottomSheetNavigator = rememberBottomSheetNavigator()
     val navController = rememberNavController(bottomSheetNavigator)
 
     ModalBottomSheetLayout(bottomSheetNavigator = bottomSheetNavigator) {
