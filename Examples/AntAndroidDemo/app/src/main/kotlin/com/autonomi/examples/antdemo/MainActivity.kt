@@ -1,9 +1,12 @@
 package com.autonomi.examples.antdemo
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.Surface
+import com.autonomi.examples.antdemo.deeplink.AntUri
+import com.autonomi.examples.antdemo.deeplink.DeepLinkNav
 import com.autonomi.examples.antdemo.files.FilesStore
 import com.autonomi.examples.antdemo.ui.AntTheme
 import com.autonomi.examples.antdemo.ui.AppShell
@@ -23,6 +26,25 @@ class MainActivity : ComponentActivity() {
                 Surface { AppShell() }
             }
         }
+        handleDeepLink(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    /// Handle an `autonomi://<address>[?name=&filetype=&filename=]` VIEW intent:
+    /// start the download (ant-webex-style filename fallbacks) and jump to the
+    /// Downloads tab.
+    private fun handleDeepLink(intent: Intent?) {
+        val data = intent?.dataString ?: return
+        if (!data.startsWith("autonomi://")) return
+        val parsed = AntUri.parse(data)
+        if (!AntUri.isValidAddress(parsed.address)) return
+        FilesStore.download(parsed.address, applicationContext, AntUri.resolveFilename(parsed))
+        DeepLinkNav.goto("downloads")
     }
 
     override fun onResume() {

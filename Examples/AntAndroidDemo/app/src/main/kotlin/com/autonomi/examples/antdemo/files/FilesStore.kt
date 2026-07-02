@@ -62,12 +62,20 @@ object FilesStore {
         )
     }
 
-    // A single client is connected on first use and reused across operations.
+    // Clients are connected on first use and reused. Two flavours:
+    //  - walletClient: manifest wallet attached (devnet single-shot fallback).
+    //  - esClient: no wallet — for the external-signer flow (works with the
+    //    Sepolia devnet, whose manifest has no key).
     private val clientLock = Mutex()
-    @Volatile private var client: Client? = null
+    @Volatile private var walletClient: Client? = null
+    @Volatile private var esClient: Client? = null
 
     private suspend fun client(): Client = clientLock.withLock {
-        client ?: Client.connectFromDevnetManifest(MANIFEST_PATH).also { client = it }
+        walletClient ?: Client.connectFromDevnetManifest(MANIFEST_PATH).also { walletClient = it }
+    }
+
+    private suspend fun externalSignerClient(): Client = clientLock.withLock {
+        esClient ?: Client.connectFromDevnetManifestExternalSigner(MANIFEST_PATH).also { esClient = it }
     }
 
     // ---- Uploads ----
@@ -99,7 +107,7 @@ object FilesStore {
     /// External-signer flow: the connected wallet pays; no key on device.
     private suspend fun externalSignerUpload(id: Long, bytes: ByteArray, context: Context) {
         val evm = parseManifestEvm(context)
-        val c = client()
+        val c = externalSignerClient()
 
         // Phase 1 — prepare: encrypt + collect quotes (status: Quoting).
         val prepared = withContext(Dispatchers.IO) { c.prepareDataUpload(bytes, "public") }
@@ -171,24 +179,28 @@ object FilesStore {
     // ---- Downloads ----
 
     /// Download public data by hex address and save it into the app's
-    /// downloads dir.
-    fun download(addressHex: String, context: Context) {
+    /// downloads dir. `suggestedName` (e.g. from an `autonomi://` deep link)
+    /// is used for the row label and the saved file name when provided.
+    fun download(addressHex: String, context: Context, suggestedName: String? = null) {
         val addr = addressHex.trim()
         val id = ids.getAndIncrement()
         val shortAddr = if (addr.length > 10) "${addr.take(10)}…" else addr
+        val rowName = suggestedName ?: "download-$shortAddr"
+        val fileName = suggestedName ?: "download-${addr.take(16)}.bin"
         downloads.add(
             0,
             FileEntry(
-                id = id, kind = FileKind.Download, name = "download-$shortAddr", sizeBytes = 0,
+                id = id, kind = FileKind.Download, name = rowName, sizeBytes = 0,
                 status = FileStatus.Downloading, createdAt = System.currentTimeMillis(), address = addr,
             ),
         )
         scope.launch {
             try {
-                val c = client()
+                // Downloads read from either client; prefer whichever is connected.
+                val c = esClient ?: walletClient ?: client()
                 val data = withContext(Dispatchers.IO) { c.dataGetPublic(addr) }
                 val dir = File(context.filesDir, "downloads").apply { mkdirs() }
-                val out = File(dir, "download-${addr.take(16)}.bin")
+                val out = File(dir, fileName)
                 out.writeBytes(data)
                 setDownload(id) {
                     it.copy(

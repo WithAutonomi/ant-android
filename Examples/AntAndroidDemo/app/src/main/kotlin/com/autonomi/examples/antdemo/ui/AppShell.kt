@@ -13,6 +13,8 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +58,15 @@ fun AppShell() {
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val title = DESTS.firstOrNull { it.route == currentRoute }?.label ?: "Autonomi"
+
+    // Deep-link (`autonomi://…`) navigation: jump to the requested tab.
+    val deepLinkTarget by com.autonomi.examples.antdemo.deeplink.DeepLinkNav.target.collectAsState()
+    LaunchedEffect(deepLinkTarget) {
+        deepLinkTarget?.let { route ->
+            navController.navigate(route) { launchSingleTop = true }
+            com.autonomi.examples.antdemo.deeplink.DeepLinkNav.consumed()
+        }
+    }
 
     ModalBottomSheetLayout(bottomSheetNavigator = bottomSheetNavigator) {
         Scaffold(
