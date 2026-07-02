@@ -44,7 +44,7 @@ fun UploadsScreen() {
         uri ?: return@rememberLauncherForActivityResult
         val name = queryDisplayName(context, uri)
         val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        if (bytes != null) FilesStore.upload(name, bytes)
+        if (bytes != null) FilesStore.upload(name, bytes, context)
     }
 
     LazyColumn(

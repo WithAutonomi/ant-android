@@ -88,22 +88,21 @@ object WalletConnectManager {
         }
     }
 
-    /// Build + send an ERC-20 `approve(vault, amount)` to the connected wallet
-    /// for signing. Suspends until the wallet responds. Returns the tx hash.
-    suspend fun sendApprove(chain: AutonomiChain, amount: String = "0"): String {
+    /// Send a raw `eth_sendTransaction` (to, calldata) to the connected wallet
+    /// for signing. Suspends until the wallet responds; returns the tx hash.
+    /// One request in flight at a time — callers await sequentially.
+    suspend fun sendTransaction(to: String, data: String, value: String = "0x0"): String {
         val from = AppKit.getAccount()?.address ?: error("No wallet connected")
-        val data = EthCalldata.approve(spender = chain.paymentVaultAddress, amount = amount)
         // eth_sendTransaction params: a 1-element array of the tx object (JSON).
-        val txJson = """[{"from":"$from","to":"${chain.tokenAddress}","data":"$data","value":"0x0"}]"""
+        val txJson = """[{"from":"$from","to":"$to","data":"$data","value":"$value"}]"""
 
         val deferred = CompletableDeferred<String>()
         pending = deferred
         _state.value = _state.value.copy(status = "Awaiting wallet signature…")
 
         // Request's 3rd arg (numeric chainId: Long?) is defaulted → omitted, so
-        // the request targets the session's selected chain (user picks Arbitrum
-        // in the connect modal). The explicit SentRequestResult param type
-        // disambiguates request()'s two overloads.
+        // the request targets the session's selected chain. The explicit
+        // SentRequestResult param type disambiguates request()'s two overloads.
         AppKit.request(
             request = Request(method = "eth_sendTransaction", params = txJson),
             onSuccess = { _: SentRequestResult -> /* delivered; result via delegate */ },
@@ -113,6 +112,10 @@ object WalletConnectManager {
         _state.value = _state.value.copy(lastTxHash = hash, status = "Signed. tx: $hash")
         return hash
     }
+
+    /// Convenience: ERC-20 `approve(vault, amount)` on the token contract.
+    suspend fun sendApprove(chain: AutonomiChain, amount: String = "0"): String =
+        sendTransaction(to = chain.tokenAddress, data = EthCalldata.approve(chain.paymentVaultAddress, amount))
 
     private object Delegate : AppKit.ModalDelegate {
         override fun onSessionApproved(approvedSession: Modal.Model.ApprovedSession) { refreshAccount() }

@@ -2,6 +2,8 @@ package com.autonomi.examples.antdemo.files
 
 import android.content.Context
 import androidx.compose.runtime.mutableStateListOf
+import com.autonomi.examples.antdemo.wallet.EthCalldata
+import com.autonomi.examples.antdemo.wallet.WalletConnectManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -9,6 +11,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import uniffi.ant_ffi.Client
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
@@ -69,8 +72,11 @@ object FilesStore {
 
     // ---- Uploads ----
 
-    /// Upload raw bytes (picked from a content Uri) as public data.
-    fun upload(name: String, bytes: ByteArray) {
+    /// Upload raw bytes (picked from a content Uri) as public data. If a wallet
+    /// is connected, uses the external-signer flow (prepare → wallet signs
+    /// approve + payForQuotes → finalize); otherwise falls back to the
+    /// devnet-wallet single-shot put.
+    fun upload(name: String, bytes: ByteArray, context: Context) {
         val id = ids.getAndIncrement()
         uploads.add(
             0,
@@ -79,23 +85,87 @@ object FilesStore {
                 status = FileStatus.Quoting, createdAt = System.currentTimeMillis(),
             ),
         )
+        val walletConnected = WalletConnectManager.state.value.address != null
         scope.launch {
             try {
-                val c = client()
-                setUpload(id) { it.copy(status = FileStatus.Uploading, progress = null) }
-                val result = withContext(Dispatchers.IO) { c.dataPutPublic(bytes, "auto") }
-                setUpload(id) {
-                    it.copy(
-                        status = FileStatus.Complete,
-                        address = result.address,
-                        cost = "${result.chunksStored} chunk(s) · ${result.paymentModeUsed}",
-                        progress = null,
-                    )
-                }
+                if (walletConnected) externalSignerUpload(id, bytes, context)
+                else devnetUpload(id, bytes)
             } catch (e: Throwable) {
                 setUpload(id) { it.copy(status = FileStatus.Failed, error = e.message, progress = null) }
             }
         }
+    }
+
+    /// External-signer flow: the connected wallet pays; no key on device.
+    private suspend fun externalSignerUpload(id: Long, bytes: ByteArray, context: Context) {
+        val evm = parseManifestEvm(context)
+        val c = client()
+
+        // Phase 1 — prepare: encrypt + collect quotes (status: Quoting).
+        val prepared = withContext(Dispatchers.IO) { c.prepareDataUpload(bytes, "public") }
+
+        if (prepared.alreadyStored) {
+            val result = withContext(Dispatchers.IO) { c.finalizeUpload(prepared.uploadId, emptyMap()) }
+            setUpload(id) {
+                it.copy(status = FileStatus.Complete, address = result.address ?: prepared.dataMapAddress,
+                    cost = "already stored", progress = null)
+            }
+            return
+        }
+
+        // Phase 2 — the wallet signs the payment (approve + payForQuotes).
+        setUpload(id) { it.copy(status = FileStatus.AwaitingApproval, cost = "${prepared.payments.size} quote(s) · ${prepared.totalAmount} atto") }
+        withContext(Dispatchers.Main) {
+            WalletConnectManager.sendTransaction(
+                to = evm.tokenAddress,
+                data = EthCalldata.approve(evm.vaultAddress, prepared.totalAmount),
+            )
+        }
+
+        setUpload(id) { it.copy(status = FileStatus.Paying) }
+        val quotePayments = prepared.payments.map {
+            EthCalldata.QuotePayment(rewardsAddress = it.rewardsAddress, amount = it.amount, quoteHash = it.quoteHash)
+        }
+        val payTx = withContext(Dispatchers.Main) {
+            WalletConnectManager.sendTransaction(
+                to = evm.vaultAddress,
+                data = EthCalldata.payForQuotes(quotePayments),
+            )
+        }
+
+        // Phase 3 — finalize: store the chunks with the payment tx hashes.
+        setUpload(id) { it.copy(status = FileStatus.Uploading, progress = null) }
+        val txHashes = prepared.payments.associate { it.quoteHash to payTx }
+        val result = withContext(Dispatchers.IO) { c.finalizeUpload(prepared.uploadId, txHashes) }
+        setUpload(id) {
+            it.copy(status = FileStatus.Complete, address = result.address ?: prepared.dataMapAddress,
+                cost = "${result.chunksStored} chunk(s) · gas ${result.gasCostWei}", progress = null)
+        }
+    }
+
+    /// Devnet fallback: the manifest wallet pays inside ant-core (single-shot).
+    private suspend fun devnetUpload(id: Long, bytes: ByteArray) {
+        val c = client()
+        setUpload(id) { it.copy(status = FileStatus.Uploading, progress = null) }
+        val result = withContext(Dispatchers.IO) { c.dataPutPublic(bytes, "auto") }
+        setUpload(id) {
+            it.copy(status = FileStatus.Complete, address = result.address,
+                cost = "${result.chunksStored} chunk(s) · ${result.paymentModeUsed}", progress = null)
+        }
+    }
+
+    /// EVM contract addresses read from the on-device devnet manifest — needed
+    /// to build the approve + payForQuotes calldata the wallet signs.
+    private data class DevnetEvm(val rpcUrl: String, val tokenAddress: String, val vaultAddress: String)
+
+    private fun parseManifestEvm(context: Context): DevnetEvm {
+        val json = JSONObject(File(MANIFEST_PATH).readText())
+        val evm = json.getJSONObject("evm")
+        return DevnetEvm(
+            rpcUrl = evm.getString("rpc_url"),
+            tokenAddress = evm.getString("payment_token_address"),
+            vaultAddress = evm.getString("payment_vault_address"),
+        )
     }
 
     // ---- Downloads ----
