@@ -10,8 +10,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -41,23 +45,15 @@ fun SettingsScreen() {
     ) {
         val colWidth = Modifier.fillMaxWidth().widthIn(max = 560.dp)
 
-        SettingCard(colWidth, "Storage Directory", "Where uploaded chunks are cached before payment.") {
-            PathRow("/data/user/0/com.autonomi.examples.antdemo/files/store")
-        }
-
-        SettingCard(colWidth, "Downloads Directory", "Where retrieved files are written.") {
-            PathRow("/data/user/0/com.autonomi.examples.antdemo/files/downloads")
-        }
-
         SettingCard(colWidth, "Alert Sound", "Bell on critical errors.") {
             ToggleRow(checked = false, onChange = {})
         }
 
         // The one live control.
-        SettingCard(colWidth, "Light Mode", "Switch between dark and light themes.") {
-            ToggleRow(
-                checked = !ThemeController.dark,
-                onChange = { light -> ThemeController.setDark(context, !light) },
+        SettingCard(colWidth, "Screen mode", "Switch between dark and light themes.") {
+            ScreenModeSelector(
+                dark = ThemeController.dark,
+                onSelect = { isDark -> ThemeController.setDark(context, isDark) },
             )
         }
 
@@ -68,7 +64,6 @@ fun SettingsScreen() {
         SettingCard(colWidth, "About", null) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 KeyVal("App", "AntFfi Demo 0.1")
-                KeyVal("Node daemon", "ant-core 0.2.5")
                 Text(
                     "autonomi.com  ·  github.com/WithAutonomi",
                     style = MaterialTheme.typography.bodySmall,
@@ -101,6 +96,24 @@ private fun SettingCard(
     }
 }
 
+/// Segmented Dark | Light selector — left = Dark, right = Light.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ScreenModeSelector(dark: Boolean, onSelect: (Boolean) -> Unit) {
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        SegmentedButton(
+            selected = dark,
+            onClick = { onSelect(true) },
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+        ) { Text("Dark") }
+        SegmentedButton(
+            selected = !dark,
+            onClick = { onSelect(false) },
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+        ) { Text("Light") }
+    }
+}
+
 @Composable
 private fun ToggleRow(checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -112,24 +125,6 @@ private fun ToggleRow(checked: Boolean, onChange: (Boolean) -> Unit) {
                 checkedTrackColor = MaterialTheme.colorScheme.primary,
             ),
         )
-    }
-}
-
-@Composable
-private fun PathRow(path: String) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            path,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        OutlinedButton(onClick = {}) { Text("Browse") }
     }
 }
 
