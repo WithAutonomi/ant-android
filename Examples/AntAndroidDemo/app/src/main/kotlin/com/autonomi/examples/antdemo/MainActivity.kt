@@ -27,6 +27,8 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val REOWN_PROJECT_ID = "REPLACE_WITH_REOWN_PROJECT_ID"
+        // Dedicated Reown (WalletConnect Cloud) projectId for the mobile SDK.
+        // projectIds are public client identifiers (shipped in apps), not secrets.
+        private const val REOWN_PROJECT_ID = "2cd5b44944e27d5234557a9183dc1cdd"
     }
 }
