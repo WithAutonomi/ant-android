@@ -1,11 +1,21 @@
 package com.autonomi.examples.antdemo.files
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -34,9 +44,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
-/// Uploads tab — the mobile analogue of the Uploads half of the desktop file
-/// manager (`ant-ui/pages/files.vue`). List of upload rows + a file picker.
+/// Uploads tab — pick a file to stage it; the confirm dialog (quote → Approve)
+/// opens automatically when a wallet is connected.
 @Composable
 fun UploadsScreen() {
     val context = LocalContext.current
@@ -44,7 +55,7 @@ fun UploadsScreen() {
         uri ?: return@rememberLauncherForActivityResult
         val name = queryDisplayName(context, uri)
         val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        if (bytes != null) FilesStore.upload(name, bytes, context)
+        if (bytes != null) FilesStore.stageUpload(name, bytes, context)
     }
 
     LazyColumn(
@@ -52,9 +63,7 @@ fun UploadsScreen() {
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(bottom = 24.dp),
     ) {
-        item {
-            Button(onClick = { picker.launch("*/*") }) { Text("Upload a file") }
-        }
+        item { Button(onClick = { picker.launch("*/*") }) { Text("Upload a file") } }
         if (FilesStore.uploads.isEmpty()) {
             item { EmptyState("No uploads yet", "Tap “Upload a file” to store data on the network") }
         } else {
@@ -63,12 +72,27 @@ fun UploadsScreen() {
     }
 }
 
-/// Downloads tab — the Downloads half: retrieve by content address, list of
-/// download rows.
+/// Downloads tab — one input + one Download button, two ways in: paste an
+/// address / autonomi:// link, or attach (📎) a datamap file.
 @Composable
 fun DownloadsScreen() {
     val context = LocalContext.current
-    var address by remember { mutableStateOf("") }
+    var input by remember { mutableStateOf("") }
+    var datamapHex by remember { mutableStateOf<String?>(null) }
+    var datamapName by remember { mutableStateOf<String?>(null) }
+
+    val datamapPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        uri ?: return@rememberLauncherForActivityResult
+        val hex = context.contentResolver.openInputStream(uri)?.use {
+            it.readBytes().toString(Charsets.UTF_8)
+        }?.trim()
+        if (!hex.isNullOrEmpty()) {
+            datamapHex = hex
+            datamapName = queryDisplayName(context, uri)
+        }
+    }
+
+    val canDownload = datamapHex != null || input.isNotBlank()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -76,21 +100,54 @@ fun DownloadsScreen() {
         contentPadding = PaddingValues(bottom = 24.dp),
     ) {
         item {
-            OutlinedTextField(
-                value = address,
-                onValueChange = { address = it },
-                label = { Text("Address (hex)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedButton(
-                enabled = address.isNotBlank(),
-                onClick = { FilesStore.download(address, context); address = "" },
-                modifier = Modifier.padding(top = 6.dp),
-            ) { Text("Download by address") }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    label = { Text("Address or autonomi:// link") },
+                    singleLine = true,
+                    enabled = datamapHex == null,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedButton(onClick = { datamapPicker.launch("*/*") }) { Text("📎", fontSize = 18.sp) }
+            }
+        }
+        datamapName?.let { name ->
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("📄 $name", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                    Text("✕",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .clickable { datamapHex = null; datamapName = null })
+                }
+            }
+        }
+        item {
+            Button(
+                enabled = canDownload,
+                onClick = {
+                    val hex = datamapHex
+                    if (hex != null) {
+                        FilesStore.downloadFromDatamap(hex, datamapName, context)
+                        datamapHex = null; datamapName = null
+                    } else {
+                        FilesStore.download(input, context); input = ""
+                    }
+                },
+            ) { Text("Download") }
         }
         if (FilesStore.downloads.isEmpty()) {
-            item { EmptyState("No downloads yet", "Paste a content address above to retrieve it") }
+            item { EmptyState("No downloads yet", "Paste an address or autonomi:// link, or 📎 attach a datamap file") }
         } else {
             items(FilesStore.downloads, key = { it.id }) { FileRow(it) }
         }
@@ -111,12 +168,25 @@ private fun EmptyState(title: String, subtitle: String) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(entry: FileEntry) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    // Shareable link for a public upload (autonomi://<data-map address>).
+    val autonomiLink = if (entry.kind == FileKind.Upload) entry.address?.let { "autonomi://$it" } else null
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp))
+            // Long-press → copy the shareable reference.
+            .combinedClickable(
+                onClick = {},
+                onLongClick = {
+                    (autonomiLink ?: entry.dataMapFile)?.let { clipboard.setText(AnnotatedString(it)) }
+                },
+            )
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -131,15 +201,29 @@ private fun FileRow(entry: FileEntry) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (entry.status.inProgress) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
+            val p = entry.progress
+            if (p != null) {
+                LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
+            }
+            entry.stageDetail?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         entry.cost?.let {
             Text("Cost: $it", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        entry.address?.takeIf { entry.kind == FileKind.Upload }?.let { addr ->
+        autonomiLink?.let { link ->
             SelectionContainer {
-                Text(addr, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                Text(link, style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary, maxLines = 1)
+            }
+        }
+        entry.dataMapFile?.let { path ->
+            TextButton(onClick = { openFile(context, path) }, contentPadding = PaddingValues(0.dp)) {
+                Text("Open file")
             }
         }
         entry.savedTo?.let {
@@ -147,6 +231,19 @@ private fun FileRow(entry: FileEntry) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/// Share a saved datamap file with another app via FileProvider.
+private fun openFile(context: Context, path: String) {
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/octet-stream"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(
+        Intent.createChooser(intent, "Open datamap file").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    )
 }
 
 @Composable

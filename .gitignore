@@ -4,3 +4,6 @@ build/
 *.iml
 local.properties
 .DS_Store
+
+# FFI binary — shipped via ant-sdk release, not tracked
+*.aar

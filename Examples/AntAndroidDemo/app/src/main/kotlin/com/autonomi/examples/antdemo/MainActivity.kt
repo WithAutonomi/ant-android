@@ -18,7 +18,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         AntFfiBootstrap.plantOnce(applicationContext)
         ThemeController.load(applicationContext)
-        FilesStore.seedMockData()
         // WalletConnect: dedicated projectId from https://dashboard.reown.com.
         WalletConnectManager.configure(application, REOWN_PROJECT_ID)
         setContent {
@@ -41,9 +40,7 @@ class MainActivity : ComponentActivity() {
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.dataString ?: return
         if (!data.startsWith("autonomi://")) return
-        val parsed = AntUri.parse(data)
-        if (!AntUri.isValidAddress(parsed.address)) return
-        FilesStore.download(parsed.address, applicationContext, AntUri.resolveFilename(parsed))
+        FilesStore.download(data, applicationContext)
         DeepLinkNav.goto("downloads")
     }
 

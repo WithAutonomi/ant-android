@@ -3,6 +3,7 @@ package com.autonomi.examples.antdemo.files
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /// Lifecycle states mirroring the desktop app's file manager
 /// (ant-ui `pages/files.vue` statusLabel). Uploads progress
@@ -40,10 +41,36 @@ data class FileEntry(
     val cost: String? = null,
     /// Where a downloaded file was written on device.
     val savedTo: String? = null,
-    /// 0.0–1.0 while in progress, or null for indeterminate.
-    val progress: Float? = null,
+    /// For private uploads: path to the saved data-map file (used to re-download).
+    val dataMapFile: String? = null,
+    // ── Live transfer progress (from the FFI ProgressListener) ──
+    /// "encrypting", "quoting", "storing", "resolving", "downloading" — or null.
+    val stage: String? = null,
+    val stageDone: Long = 0,
+    val stageTotal: Long = 0,
     val error: String? = null,
-)
+) {
+    /// 0.0–1.0 of the current stage, or null when the total is unknown (render
+    /// an indeterminate bar). Mirrors the desktop's per-stage percent.
+    val progress: Float?
+        get() = if (stageTotal > 0) (stageDone.toFloat() / stageTotal).coerceAtMost(1f) else null
+
+    /// Sub-stage detail line under the badge, mirroring desktop files.vue.
+    val stageDetail: String?
+        get() = when (stage) {
+            "encrypting" -> "Encrypting…"
+            "quoting" -> pctLabel("Quoting")
+            "storing" -> pctLabel("Storing")
+            "resolving" -> pctLabel("Resolving datamap")
+            "downloading" -> pctLabel("Downloading")
+            else -> null
+        }
+
+    private fun pctLabel(base: String): String {
+        val p = progress
+        return if (p != null) "$base · ${(p * 100).roundToInt()}%" else "$base…"
+    }
+}
 
 /// Human-readable status text, matching the desktop's statusLabel.
 fun FileEntry.statusText(): String = when (status) {
@@ -60,6 +87,17 @@ fun formatSize(bytes: Long): String {
         value /= 1024; i++
     }
     return String.format(Locale.US, "%.1f %s", value, units[i])
+}
+
+/// Format an atto-token amount (1e18 = 1 ANT) as a short ANT string.
+fun formatAtto(atto: String): String {
+    val value = atto.toBigDecimalOrNull() ?: return atto
+    val ant = value.movePointLeft(18)
+    return when {
+        ant.signum() == 0 -> "0"
+        ant < java.math.BigDecimal("0.0001") -> ant.setScale(8, java.math.RoundingMode.HALF_UP).toPlainString()
+        else -> ant.setScale(6, java.math.RoundingMode.HALF_UP).toPlainString()
+    }
 }
 
 private val dateFmt = SimpleDateFormat("MMM d, HH:mm", Locale.US)

@@ -1,26 +1,48 @@
 package com.autonomi.examples.antdemo.files
 
 import android.content.Context
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import com.autonomi.examples.antdemo.deeplink.AntUri
 import com.autonomi.examples.antdemo.wallet.EthCalldata
 import com.autonomi.examples.antdemo.wallet.WalletConnectManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import uniffi.ant_ffi.Client
+import uniffi.ant_ffi.PreparedUploadInfo
+import uniffi.ant_ffi.ProgressListener
+import uniffi.ant_ffi.ProgressUpdate
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.atomic.AtomicLong
 
-/// Backing store for the Files screen — the mobile analogue of the desktop
-/// app's files store (`ant-ui/stores/files.ts`). Holds the Uploads and
-/// Downloads lists as Compose state and drives real network operations
-/// through the bundled AntFfi AAR (devnet-backed for now; the external-signer
-/// prepare/finalize flow slots in once that AAR ships — PR #199).
+/// An upload that has been (or is being) quoted and is waiting for the user to
+/// review the cost and Approve — drives the confirm dialog. Mirrors the desktop
+/// UploadConfirmDialog's bound state.
+data class PendingUpload(
+    val id: Long,
+    val name: String,
+    val bytes: ByteArray,
+    val visibility: String,          // "private" | "public"
+    val info: PreparedUploadInfo?,   // null while (re)quoting
+    val quoting: Boolean,
+    val error: String?,
+)
+
+/// Backing store for the Files screens — the mobile analogue of the desktop
+/// app's files store (`ant-ui/stores/files.ts`). Drives real network operations
+/// through the bundled AntFfi AAR, with a quote → approve two-step upload and
+/// live progress via the FFI's ProgressListener.
 object FilesStore {
     /// Devnet manifest pushed to the device (see README wiring step).
     private const val MANIFEST_PATH = "/data/local/tmp/devnet-manifest.json"
@@ -28,44 +50,14 @@ object FilesStore {
     val uploads = mutableStateListOf<FileEntry>()
     val downloads = mutableStateListOf<FileEntry>()
 
+    /// Non-null while an upload is being quoted / awaiting the user's Approve.
+    var pendingUpload by mutableStateOf<PendingUpload?>(null)
+        private set
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ids = AtomicLong(1)
 
-    /// Populate the lists with realistic sample rows so the UI looks lived-in
-    /// without a live network. Idempotent; call once on launch.
-    fun seedMockData() {
-        if (uploads.isNotEmpty() || downloads.isNotEmpty()) return
-        val now = System.currentTimeMillis()
-        val min = 60_000L
-        val addr = "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00"
-        uploads.addAll(
-            listOf(
-                FileEntry(ids.getAndIncrement(), FileKind.Upload, "backup.zip", 15_728_640,
-                    FileStatus.Uploading, now - 30_000, cost = "42 chunk(s) · auto", progress = null),
-                FileEntry(ids.getAndIncrement(), FileKind.Upload, "vacation.jpg", 2_411_724,
-                    FileStatus.Complete, now - 12 * min, address = addr, cost = "6 chunk(s) · auto"),
-                FileEntry(ids.getAndIncrement(), FileKind.Upload, "quarterly-report.pdf", 842_133,
-                    FileStatus.Complete, now - 55 * min, address = "9f8e7d6c5b4a39281706f5e4d3c2b1a0" +
-                        "0f1e2d3c4b5a69788796a5b4c3d2e1f0", cost = "3 chunk(s) · auto"),
-                FileEntry(ids.getAndIncrement(), FileKind.Upload, "notes.txt", 1_204,
-                    FileStatus.Failed, now - 70 * min, error = "Network unavailable"),
-            ),
-        )
-        downloads.addAll(
-            listOf(
-                FileEntry(ids.getAndIncrement(), FileKind.Download, "download-a1b2c3d4e5…", 2_411_724,
-                    FileStatus.Downloaded, now - 8 * min, address = addr,
-                    savedTo = "/…/files/downloads/download-a1b2c3d4e5f60718.bin"),
-                FileEntry(ids.getAndIncrement(), FileKind.Download, "download-77aa88bb…", 0,
-                    FileStatus.Downloading, now - 20_000, address = "77aa88bb"),
-            ),
-        )
-    }
-
-    // Clients are connected on first use and reused. Two flavours:
-    //  - walletClient: manifest wallet attached (devnet single-shot fallback).
-    //  - esClient: no wallet — for the external-signer flow (works with the
-    //    Sepolia devnet, whose manifest has no key).
+    // Clients are connected on first use and reused.
     private val clientLock = Mutex()
     @Volatile private var walletClient: Client? = null
     @Volatile private var esClient: Client? = null
@@ -78,156 +70,293 @@ object FilesStore {
         esClient ?: Client.connectFromDevnetManifestExternalSigner(MANIFEST_PATH).also { esClient = it }
     }
 
-    // ---- Uploads ----
+    // ---- Uploads: quote → approve ----
 
-    /// Upload raw bytes (picked from a content Uri) as public data. If a wallet
-    /// is connected, uses the external-signer flow (prepare → wallet signs
-    /// approve + payForQuotes → finalize); otherwise falls back to the
-    /// devnet-wallet single-shot put.
-    fun upload(name: String, bytes: ByteArray, context: Context) {
+    /// Step 1: stage a file and start quoting. Opens the confirm dialog
+    /// (`pendingUpload`). With no wallet connected, falls back to the devnet
+    /// single-shot put immediately (nothing to sign).
+    fun stageUpload(name: String, bytes: ByteArray, context: Context) {
         val id = ids.getAndIncrement()
-        uploads.add(
-            0,
-            FileEntry(
-                id = id, kind = FileKind.Upload, name = name, sizeBytes = bytes.size.toLong(),
-                status = FileStatus.Quoting, createdAt = System.currentTimeMillis(),
-            ),
-        )
-        val walletConnected = WalletConnectManager.state.value.address != null
+        uploads.add(0, FileEntry(id, FileKind.Upload, name, bytes.size.toLong(),
+            FileStatus.Quoting, System.currentTimeMillis()))
+        if (WalletConnectManager.state.value.address == null) {
+            scope.launch {
+                try { devnetUpload(id, bytes) }
+                catch (e: Throwable) { setUpload(id) { it.copy(status = FileStatus.Failed, error = e.message) } }
+            }
+            return
+        }
+        pendingUpload = PendingUpload(id, name, bytes, "private", null, quoting = true, error = null)
+        quote(id)
+    }
+
+    /// Flip visibility and re-quote (public pays for one extra chunk).
+    fun setPendingVisibility(vis: String) {
+        val p = pendingUpload ?: return
+        if (p.visibility == vis) return
+        pendingUpload = p.copy(visibility = vis, info = null, quoting = true, error = null)
+        quote(p.id)
+    }
+
+    private fun quote(id: Long) {
+        val pending = pendingUpload ?: return
+        setUpload(id) { it.copy(status = FileStatus.Quoting) }
         scope.launch {
             try {
-                if (walletConnected) externalSignerUpload(id, bytes, context)
-                else devnetUpload(id, bytes)
+                val c = externalSignerClient()
+                val info = withContext(Dispatchers.IO) { c.prepareDataUpload(pending.bytes, pending.visibility) }
+                val p = pendingUpload ?: return@launch
+                if (p.id != id) return@launch
+                pendingUpload = p.copy(info = info, quoting = false)
+                setUpload(id) {
+                    it.copy(status = FileStatus.AwaitingApproval,
+                        cost = "${info.payments.size} quote(s) · ${formatAtto(info.totalAmount)} ANT")
+                }
             } catch (e: Throwable) {
-                setUpload(id) { it.copy(status = FileStatus.Failed, error = e.message, progress = null) }
+                pendingUpload?.let { if (it.id == id) pendingUpload = it.copy(quoting = false, error = e.message) }
+                setUpload(id) { it.copy(status = FileStatus.Failed, error = e.message) }
             }
         }
     }
 
-    /// External-signer flow: the connected wallet pays; no key on device.
-    private suspend fun externalSignerUpload(id: Long, bytes: ByteArray, context: Context) {
-        val evm = parseManifestEvm(context)
-        val c = externalSignerClient()
+    /// Public + already-stored: the data-map address is already known from the
+    /// quote, so no finalize or transaction is needed — complete the row now.
+    fun completeAlreadyStored() {
+        val p = pendingUpload ?: return
+        val addr = p.info?.dataMapAddress ?: return
+        val id = p.id
+        pendingUpload = null
+        setUpload(id) { it.copy(status = FileStatus.Complete, stage = null, address = addr, cost = "already stored") }
+    }
 
-        // Phase 1 — prepare: encrypt + collect quotes (status: Quoting).
-        val prepared = withContext(Dispatchers.IO) { c.prepareDataUpload(bytes, "public") }
+    /// Cancel the pending upload (dismiss the dialog, drop the row).
+    fun cancelPending() {
+        pendingUpload?.let { p -> uploads.removeAll { it.id == p.id } }
+        pendingUpload = null
+    }
 
-        if (prepared.alreadyStored) {
-            val result = withContext(Dispatchers.IO) { c.finalizeUpload(prepared.uploadId, emptyMap()) }
-            setUpload(id) {
-                it.copy(status = FileStatus.Complete, address = result.address ?: prepared.dataMapAddress,
-                    cost = "already stored", progress = null)
+    /// Step 2: the user approved. Sign the payment then finalize with progress.
+    fun approvePending(context: Context) {
+        val p = pendingUpload ?: return
+        val info = p.info ?: return
+        val id = p.id
+        val visibility = p.visibility
+        pendingUpload = null
+        scope.launch {
+            try {
+                val c = externalSignerClient()
+                if (info.alreadyStored) {
+                    val r = withContext(Dispatchers.IO) { c.finalizeUpload(info.uploadId, emptyMap()) }
+                    completeUpload(id, visibility, r.address ?: info.dataMapAddress, r.dataMap, "already stored", context)
+                    return@launch
+                }
+                val evm = parseManifestEvm()
+
+                setUpload(id) { it.copy(status = FileStatus.AwaitingApproval) }
+                val approveTx = withContext(Dispatchers.Main) {
+                    evm.chainId?.let { WalletConnectManager.switchChain(it) }
+                    WalletConnectManager.sendTransaction(
+                        to = evm.tokenAddress,
+                        data = EthCalldata.approve(evm.vaultAddress, info.totalAmount),
+                    )
+                }
+                waitForReceipt(evm.rpcUrl, approveTx)
+
+                setUpload(id) { it.copy(status = FileStatus.Paying) }
+                val quotePayments = info.payments.map {
+                    EthCalldata.QuotePayment(rewardsAddress = it.rewardsAddress, amount = it.amount, quoteHash = it.quoteHash)
+                }
+                val payTx = withContext(Dispatchers.Main) {
+                    WalletConnectManager.sendTransaction(
+                        to = evm.vaultAddress,
+                        data = EthCalldata.payForQuotes(quotePayments),
+                    )
+                }
+                waitForReceipt(evm.rpcUrl, payTx)
+
+                setUpload(id) {
+                    it.copy(status = FileStatus.Uploading, stage = "storing", stageDone = 0,
+                        stageTotal = info.payments.size.toLong())
+                }
+                val txHashes = info.payments.associate { it.quoteHash to payTx }
+                val r = withContext(Dispatchers.IO) {
+                    c.finalizeUploadWithProgress(info.uploadId, txHashes, progressListener(id, isUpload = true))
+                }
+                // Gas was paid by the external wallet (not ant-core), so read it
+                // back from the approve + payForQuotes receipts.
+                val gas = gasSpentEth(evm.rpcUrl, listOf(approveTx, payTx))
+                val cost = "${r.chunksStored} chunk(s) · ${formatAtto(info.totalAmount)} ANT" +
+                    (gas?.let { " · $it ETH gas" } ?: "")
+                completeUpload(id, visibility, r.address ?: info.dataMapAddress, r.dataMap, cost, context)
+            } catch (e: Throwable) {
+                setUpload(id) { it.copy(status = FileStatus.Failed, error = e.message, stage = null) }
             }
-            return
         }
+    }
 
-        // Phase 2 — the wallet signs the payment (approve + payForQuotes).
-        setUpload(id) { it.copy(status = FileStatus.AwaitingApproval, cost = "${prepared.payments.size} quote(s) · ${prepared.totalAmount} atto") }
-        withContext(Dispatchers.Main) {
-            WalletConnectManager.sendTransaction(
-                to = evm.tokenAddress,
-                data = EthCalldata.approve(evm.vaultAddress, prepared.totalAmount),
-            )
+    private fun completeUpload(
+        id: Long, visibility: String, address: String?, dataMapHex: String, cost: String, context: Context,
+    ) {
+        var dataMapFile: String? = null
+        if (visibility == "private") {
+            val dir = File(context.filesDir, "datamaps").apply { mkdirs() }
+            val name = uploads.firstOrNull { it.id == id }?.name ?: "upload"
+            val out = File(dir, "$name.datamap")
+            out.writeText(dataMapHex)
+            dataMapFile = out.absolutePath
         }
-
-        setUpload(id) { it.copy(status = FileStatus.Paying) }
-        val quotePayments = prepared.payments.map {
-            EthCalldata.QuotePayment(rewardsAddress = it.rewardsAddress, amount = it.amount, quoteHash = it.quoteHash)
-        }
-        val payTx = withContext(Dispatchers.Main) {
-            WalletConnectManager.sendTransaction(
-                to = evm.vaultAddress,
-                data = EthCalldata.payForQuotes(quotePayments),
-            )
-        }
-
-        // Phase 3 — finalize: store the chunks with the payment tx hashes.
-        setUpload(id) { it.copy(status = FileStatus.Uploading, progress = null) }
-        val txHashes = prepared.payments.associate { it.quoteHash to payTx }
-        val result = withContext(Dispatchers.IO) { c.finalizeUpload(prepared.uploadId, txHashes) }
         setUpload(id) {
-            it.copy(status = FileStatus.Complete, address = result.address ?: prepared.dataMapAddress,
-                cost = "${result.chunksStored} chunk(s) · gas ${result.gasCostWei}", progress = null)
+            it.copy(status = FileStatus.Complete, stage = null,
+                address = if (visibility == "public") address else null,
+                dataMapFile = dataMapFile, cost = cost)
         }
     }
 
     /// Devnet fallback: the manifest wallet pays inside ant-core (single-shot).
     private suspend fun devnetUpload(id: Long, bytes: ByteArray) {
         val c = client()
-        setUpload(id) { it.copy(status = FileStatus.Uploading, progress = null) }
+        setUpload(id) { it.copy(status = FileStatus.Uploading) }
         val result = withContext(Dispatchers.IO) { c.dataPutPublic(bytes, "auto") }
         setUpload(id) {
             it.copy(status = FileStatus.Complete, address = result.address,
-                cost = "${result.chunksStored} chunk(s) · ${result.paymentModeUsed}", progress = null)
+                cost = "${result.chunksStored} chunk(s) · ${result.paymentModeUsed}")
         }
-    }
-
-    /// EVM contract addresses read from the on-device devnet manifest — needed
-    /// to build the approve + payForQuotes calldata the wallet signs.
-    private data class DevnetEvm(val rpcUrl: String, val tokenAddress: String, val vaultAddress: String)
-
-    private fun parseManifestEvm(context: Context): DevnetEvm {
-        val json = JSONObject(File(MANIFEST_PATH).readText())
-        val evm = json.getJSONObject("evm")
-        return DevnetEvm(
-            rpcUrl = evm.getString("rpc_url"),
-            tokenAddress = evm.getString("payment_token_address"),
-            vaultAddress = evm.getString("payment_vault_address"),
-        )
     }
 
     // ---- Downloads ----
 
-    /// Download public data by hex address and save it into the app's
-    /// downloads dir. `suggestedName` (e.g. from an `autonomi://` deep link)
-    /// is used for the row label and the saved file name when provided.
-    fun download(addressHex: String, context: Context, suggestedName: String? = null) {
-        val addr = addressHex.trim()
+    /// Download by a pasted address or `autonomi://<addr>?name=&filetype=` URI.
+    fun download(input: String, context: Context) {
+        val trimmed = input.trim()
+        if (trimmed.startsWith("autonomi://", ignoreCase = true)) {
+            val parsed = AntUri.parse(trimmed)
+            startDownload(parsed.address, null, AntUri.resolveFilename(parsed), context)
+        } else {
+            startDownload(trimmed, null, null, context)
+        }
+    }
+
+    /// Download a private upload from a datamap (hex read from a picked file).
+    fun downloadFromDatamap(dataMapHex: String, name: String?, context: Context) {
+        startDownload(null, dataMapHex.trim(), name, context)
+    }
+
+    private fun startDownload(addressHex: String?, dataMapHex: String?, suggestedName: String?, context: Context) {
+        val key = addressHex ?: "datamap"
         val id = ids.getAndIncrement()
-        val shortAddr = if (addr.length > 10) "${addr.take(10)}…" else addr
+        val shortAddr = if (key.length > 10) "${key.take(10)}…" else key
         val rowName = suggestedName ?: "download-$shortAddr"
-        val fileName = suggestedName ?: "download-${addr.take(16)}.bin"
-        downloads.add(
-            0,
-            FileEntry(
-                id = id, kind = FileKind.Download, name = rowName, sizeBytes = 0,
-                status = FileStatus.Downloading, createdAt = System.currentTimeMillis(), address = addr,
-            ),
-        )
+        val fileName = suggestedName ?: "download-${key.take(16)}.bin"
+        downloads.add(0, FileEntry(id, FileKind.Download, rowName, 0, FileStatus.Downloading,
+            System.currentTimeMillis(), address = addressHex, stage = "downloading"))
         scope.launch {
             try {
-                // Downloads read from either client; prefer whichever is connected.
-                val c = esClient ?: walletClient ?: client()
-                val data = withContext(Dispatchers.IO) { c.dataGetPublic(addr) }
+                val c = externalSignerClient()
                 val dir = File(context.filesDir, "downloads").apply { mkdirs() }
                 val out = File(dir, fileName)
-                out.writeBytes(data)
+                val written = withContext(Dispatchers.IO) {
+                    if (addressHex != null) {
+                        c.downloadPublicToFile(addressHex, out.absolutePath, progressListener(id, isUpload = false))
+                    } else {
+                        c.downloadPrivateToFile(dataMapHex!!, out.absolutePath, progressListener(id, isUpload = false))
+                    }
+                }
                 setDownload(id) {
-                    it.copy(
-                        status = FileStatus.Downloaded,
-                        sizeBytes = data.size.toLong(),
-                        savedTo = out.absolutePath,
-                    )
+                    it.copy(status = FileStatus.Downloaded, stage = null,
+                        sizeBytes = written.toLong(), savedTo = out.absolutePath)
                 }
             } catch (e: Throwable) {
-                setDownload(id) { it.copy(status = FileStatus.Failed, error = e.message) }
+                setDownload(id) { it.copy(status = FileStatus.Failed, error = e.message, stage = null) }
             }
         }
     }
 
+    // ---- Progress ----
+
+    private fun progressListener(id: Long, isUpload: Boolean) = object : ProgressListener {
+        override fun onProgress(update: ProgressUpdate) {
+            scope.launch(Dispatchers.Main) {
+                val t: (FileEntry) -> FileEntry = {
+                    it.copy(stage = update.phase, stageDone = update.done.toLong(), stageTotal = update.total.toLong())
+                }
+                if (isUpload) setUpload(id, t) else setDownload(id, t)
+            }
+        }
+    }
+
+    // ---- Manifest / receipts ----
+
+    private data class DevnetEvm(
+        val rpcUrl: String,
+        val tokenAddress: String,
+        val vaultAddress: String,
+        val chainId: Long?,
+    )
+
+    private fun parseManifestEvm(): DevnetEvm {
+        val json = JSONObject(File(MANIFEST_PATH).readText())
+        val evm = json.getJSONObject("evm")
+        val rpc = evm.getString("rpc_url")
+        val chainId = when {
+            rpc.contains("sepolia", ignoreCase = true) -> 421614L
+            rpc.contains("arb1") || rpc.contains("arbitrum.io/rpc") -> 42161L
+            else -> null
+        }
+        return DevnetEvm(rpc, evm.getString("payment_token_address"),
+            evm.getString("payment_vault_address"), chainId)
+    }
+
+    /// Poll the EVM RPC until a tx is mined (nodes verify payment on-chain, and
+    /// MetaMask estimates the next call against confirmed state).
+    private suspend fun waitForReceipt(rpcUrl: String, txHash: String, timeoutMs: Long = 60_000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val body = """{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["$txHash"]}"""
+            val resp = try { withContext(Dispatchers.IO) { httpPost(rpcUrl, body) } } catch (e: Exception) { null }
+            if (resp != null) {
+                val result = JSONObject(resp).optJSONObject("result")
+                when (result?.optString("status")) {
+                    "0x1" -> return
+                    "0x0" -> throw RuntimeException("payment transaction reverted on-chain")
+                }
+            }
+            delay(1500)
+        }
+        throw RuntimeException("timed out waiting for transaction to confirm")
+    }
+
+    /// Total gas spent (ETH) across the given tx hashes, from their receipts
+    /// (`gasUsed × effectiveGasPrice`). Null if none could be read.
+    private suspend fun gasSpentEth(rpcUrl: String, txHashes: List<String>): String? {
+        var totalWei = java.math.BigInteger.ZERO
+        for (h in txHashes) {
+            val body = """{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["$h"]}"""
+            val resp = try { withContext(Dispatchers.IO) { httpPost(rpcUrl, body) } } catch (e: Exception) { null } ?: continue
+            val result = JSONObject(resp).optJSONObject("result") ?: continue
+            val used = result.optString("gasUsed").removePrefix("0x").toBigIntegerOrNull(16) ?: continue
+            val price = result.optString("effectiveGasPrice").removePrefix("0x").toBigIntegerOrNull(16) ?: continue
+            totalWei = totalWei.add(used.multiply(price))
+        }
+        if (totalWei.signum() == 0) return null
+        return java.math.BigDecimal(totalWei).movePointLeft(18)
+            .setScale(6, java.math.RoundingMode.HALF_UP).toPlainString()
+    }
+
+    private fun httpPost(urlStr: String, body: String): String {
+        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"; doOutput = true; connectTimeout = 10_000; readTimeout = 10_000
+            setRequestProperty("Content-Type", "application/json")
+        }
+        conn.outputStream.use { it.write(body.toByteArray()) }
+        return conn.inputStream.bufferedReader().use { it.readText() }
+    }
+
     // ---- mutation helpers (replace-by-id keeps the list observable) ----
 
-    private fun setUpload(id: Long, transform: (FileEntry) -> FileEntry) =
-        replace(uploads, id, transform)
+    private fun setUpload(id: Long, transform: (FileEntry) -> FileEntry) = replace(uploads, id, transform)
+    private fun setDownload(id: Long, transform: (FileEntry) -> FileEntry) = replace(downloads, id, transform)
 
-    private fun setDownload(id: Long, transform: (FileEntry) -> FileEntry) =
-        replace(downloads, id, transform)
-
-    private fun replace(
-        list: MutableList<FileEntry>,
-        id: Long,
-        transform: (FileEntry) -> FileEntry,
-    ) {
+    private fun replace(list: MutableList<FileEntry>, id: Long, transform: (FileEntry) -> FileEntry) {
         val idx = list.indexOfFirst { it.id == id }
         if (idx >= 0) list[idx] = transform(list[idx])
     }

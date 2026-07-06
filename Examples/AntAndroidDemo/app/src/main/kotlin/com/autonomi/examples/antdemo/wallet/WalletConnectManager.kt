@@ -10,6 +10,7 @@ import com.reown.appkit.client.models.request.Request
 import com.reown.appkit.client.models.request.SentRequestResult
 import com.reown.appkit.presets.AppKitChainsPresets
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -88,29 +89,64 @@ object WalletConnectManager {
         }
     }
 
-    /// Send a raw `eth_sendTransaction` (to, calldata) to the connected wallet
-    /// for signing. Suspends until the wallet responds; returns the tx hash.
-    /// One request in flight at a time — callers await sequentially.
-    suspend fun sendTransaction(to: String, data: String, value: String = "0x0"): String {
-        val from = AppKit.getAccount()?.address ?: error("No wallet connected")
-        // eth_sendTransaction params: a 1-element array of the tx object (JSON).
-        val txJson = """[{"from":"$from","to":"$to","data":"$data","value":"$value"}]"""
-
+    /// Core: fire one JSON-RPC request to the connected wallet and await its
+    /// result (delivered via onSessionRequestResponse). One in flight at a time.
+    /// NOTE: appkit 1.4.1's Request has no chainId field — requests target the
+    /// session's *selected* chain, so use [switchChain] to move the wallet first.
+    private suspend fun rpc(method: String, params: String): String {
         val deferred = CompletableDeferred<String>()
         pending = deferred
-        _state.value = _state.value.copy(status = "Awaiting wallet signature…")
-
-        // Request's 3rd arg (numeric chainId: Long?) is defaulted → omitted, so
-        // the request targets the session's selected chain. The explicit
-        // SentRequestResult param type disambiguates request()'s two overloads.
         AppKit.request(
-            request = Request(method = "eth_sendTransaction", params = txJson),
+            request = Request(method = method, params = params),
             onSuccess = { _: SentRequestResult -> /* delivered; result via delegate */ },
             onError = { err: Throwable -> deferred.completeExceptionally(err) },
         )
-        val hash = deferred.await()
+        return deferred.await()
+    }
+
+    /// Send a raw `eth_sendTransaction` (to, calldata). Returns the tx hash.
+    ///
+    /// Retries on the relay's "Invalid Id": the first request after (re)connect
+    /// can be rejected before it reaches the wallet while the session is still
+    /// warming up (nothing reaches the wallet, so a retry is safe).
+    suspend fun sendTransaction(to: String, data: String, value: String = "0x0"): String {
+        var lastError: Throwable? = null
+        repeat(3) { attempt ->
+            try {
+                return sendOnce(to, data, value)
+            } catch (e: Throwable) {
+                lastError = e
+                if (attempt < 2 && e.message?.contains("invalid id", ignoreCase = true) == true) {
+                    _state.value = _state.value.copy(status = "Connecting to wallet…")
+                    delay(1500)
+                    return@repeat
+                }
+                throw e
+            }
+        }
+        throw lastError ?: IllegalStateException("send failed")
+    }
+
+    private suspend fun sendOnce(to: String, data: String, value: String): String {
+        val from = AppKit.getAccount()?.address ?: error("No wallet connected")
+        // Explicit gas: MetaMask underprices / defaults the limit to 21000 on the
+        // WalletConnect path otherwise. gas=3M ceiling, maxFee 0.5 gwei, prio 0.01
+        // gwei — only a ceiling, so generous costs nothing on Arbitrum.
+        val txJson = """[{"from":"$from","to":"$to","data":"$data","value":"$value",""" +
+            """"gas":"0x2dc6c0","maxFeePerGas":"0x1dcd6500","maxPriorityFeePerGas":"0x989680"}]"""
+        _state.value = _state.value.copy(status = "Awaiting wallet signature…")
+        val hash = rpc("eth_sendTransaction", txJson)
         _state.value = _state.value.copy(lastTxHash = hash, status = "Signed. tx: $hash")
         return hash
+    }
+
+    /// Prompt the wallet to switch to `chainId` (EIP-3326) so subsequent
+    /// requests execute on the right chain. Best-effort; ignores the null result
+    /// and a failure (e.g. wallet already on that chain / chain not added).
+    suspend fun switchChain(chainId: Long) {
+        val hex = "0x" + chainId.toString(16)
+        _state.value = _state.value.copy(status = "Switching wallet to chain $chainId…")
+        runCatching { rpc("wallet_switchEthereumChain", """[{"chainId":"$hex"}]""") }
     }
 
     /// Convenience: ERC-20 `approve(vault, amount)` on the token contract.

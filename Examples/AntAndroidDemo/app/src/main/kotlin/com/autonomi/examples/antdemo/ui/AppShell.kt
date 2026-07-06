@@ -30,6 +30,7 @@ import androidx.navigation.compose.rememberNavController
 import com.autonomi.examples.antdemo.SettingsScreen
 import com.autonomi.examples.antdemo.WalletScreen
 import com.autonomi.examples.antdemo.files.DownloadsScreen
+import com.autonomi.examples.antdemo.files.UploadConfirmDialog
 import com.autonomi.examples.antdemo.files.UploadsScreen
 import com.google.accompanist.navigation.material.ExperimentalMaterialNavigationApi
 import com.google.accompanist.navigation.material.ModalBottomSheetLayout
@@ -87,6 +88,9 @@ fun AppShell() {
             }
         }
     }
+
+    // Quote → approve dialog; floats over any screen (desktop UploadConfirmDialog).
+    UploadConfirmDialog()
 }
 
 @Composable

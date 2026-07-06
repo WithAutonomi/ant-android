@@ -8,10 +8,12 @@ import java.math.BigInteger
 ///
 /// Function selectors are hard-coded (precomputed keccak256 of the signature):
 ///   approve(address,uint256)                    -> 0x095ea7b3
-///   payForQuotes((address,uint256,bytes32)[])   -> 0x77a23fd7
+///   payForQuotes((address,uint256,bytes32)[])   -> 0xb6c2141b
+/// (Verified with `cast sig`; 0x77a23fd7 was wrong — no such function on the
+/// deployed PaymentVault, so calls reverted with empty data.)
 object EthCalldata {
     private const val APPROVE_SELECTOR = "095ea7b3"
-    private const val PAY_FOR_QUOTES_SELECTOR = "77a23fd7"
+    private const val PAY_FOR_QUOTES_SELECTOR = "b6c2141b"
 
     /// ERC-20 `approve(spender, amount)`. `amount` is a base-10 string
     /// (atto-token amounts exceed Long).
