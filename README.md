@@ -4,33 +4,39 @@ In-process Kotlin bindings for [Autonomi](https://autonomi.com), generated
 from the [`ant-sdk`](https://github.com/WithAutonomi/ant-sdk) FFI crate
 via [UniFFI](https://github.com/mozilla/uniffi-rs). Ships as a regular
 Android Archive (`.aar`) with native libraries for the three Android ABIs
-Google Play requires + ChromeOS.
+Google Play requires + ChromeOS. Talks directly to the network — no daemon
+process required.
 
 ## Installation
 
-Releases are published as a `.aar` attached to each [GitHub
-Release](https://github.com/WithAutonomi/ant-android/releases). A proper
-Maven Central listing is planned (tracked in `ant-sdk#149`); for v0.0.1
-the file-based dependency below is the recommended path.
+The SDK is published to a Maven repository hosted on GitHub Pages
+([`ant-maven`](https://github.com/WithAutonomi/ant-maven)). Add the repo, then
+the dependency.
 
-1. Download `ant-android-release.aar` from
-   [the latest release](https://github.com/WithAutonomi/ant-android/releases/latest).
-2. Drop it into your app module's `libs/` directory.
-3. Wire it up in your app's `build.gradle.kts`:
+In `settings.gradle.kts`:
 
-   ```kotlin
-   dependencies {
-       implementation(files("libs/ant-android-release.aar"))
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven("https://withautonomi.github.io/ant-maven/")
+    }
+}
+```
 
-       // Transitive deps — the AAR uses JNA to call into libant_ffi.so,
-       // and kotlinx-coroutines to model uniffi's `suspend fn` wrappers.
-       implementation("net.java.dev.jna:jna:5.14.0@aar")
-       implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
-   }
-   ```
+In your app module's `build.gradle.kts`:
 
-   And in your `settings.gradle.kts` make sure both `google()` and
-   `mavenCentral()` are configured as repositories.
+```kotlin
+dependencies {
+    implementation("com.autonomi:ant-android:0.0.3")
+    // JNA (to call into libant_ffi.so) and kotlinx-coroutines-core are
+    // pulled in transitively from the POM — no need to declare them.
+}
+```
+
+That's it — the `.so` native libraries are inside the AAR; nothing to build
+locally.
 
 ## Platforms
 
@@ -44,7 +50,24 @@ the file-based dependency below is the recommended path.
 
 Minimum `compileSdk`: 34. Minimum `minSdk`: 24 (Android 7.0).
 
+## Choosing a connect method
+
+Everything starts from a `Client`. Pick the constructor that matches how you
+pay for uploads:
+
+| Your goal | Constructor | You provide |
+|---|---|---|
+| **Download / read** public data only | `Client.connect(peers)` | bootstrap peers |
+| **Upload**, the app holds the key | `Client.connectWithWallet(peers, privateKey, rpcUrl, paymentTokenAddress, paymentVaultAddress)` | key + EVM config |
+| **Upload**, the *user's* wallet signs (WalletConnect) | `Client.connectForExternalSigner(peers, rpcUrl, paymentTokenAddress, paymentVaultAddress)` | EVM config (no key) — see below |
+| **Local testing** against a devnet | `Client.connectLocal()` or `Client.connectFromDevnetManifest(path)` | a running devnet |
+
+Every method is a `suspend fun` — call from a coroutine. A failure surfaces as
+a typed `ClientException`.
+
 ## Usage
+
+### Store and retrieve a chunk (local devnet)
 
 ```kotlin
 import uniffi.ant_ffi.Client
@@ -52,16 +75,78 @@ import kotlinx.coroutines.runBlocking
 
 runBlocking {
     val client = Client.connectLocal()
-    val data = "hello autonomi".toByteArray()
-    val result = client.chunkPut(data)
-    println("Stored at ${result.address}")
+
+    val put = client.chunkPut("hello autonomi".toByteArray())
+    val bytes = client.chunkGet(put.address)
+    println("stored at ${put.address}")
 }
 ```
+
+### Upload with an app-held key
+
+```kotlin
+val client = Client.connectWithWallet(
+    peers = listOf(/* network bootstrap multiaddrs */),
+    privateKey = "0x…",
+    rpcUrl = "https://…",
+    paymentTokenAddress = "0x…",  // ANT token
+    paymentVaultAddress = "0x…",  // payment vault
+)
+
+// Public: the data map is stored on the network; retrieve by address.
+val pub = client.dataPutPublic(payload, "auto")
+val back = client.dataGetPublic(pub.address)
+
+// Private: you keep the returned hex data map; it's the only way back in.
+val priv = client.dataPutPrivate(payload, "auto")
+val secret = client.dataGetPrivate(priv.dataMap)
+```
+
+### Error handling
+
+```kotlin
+try {
+    client.dataGetPublic(addr)
+} catch (e: ClientException.NotFound) {
+    // address isn't on the network
+} catch (e: ClientException.NetworkError) {
+    // transient — safe to retry
+} catch (e: ClientException.PaymentError) {
+    // …
+}
+```
+
+### Paying with the user's own wallet (external signer)
+
+`connectForExternalSigner` never holds a key. You `prepareDataUpload` /
+`prepareFileUpload`, sign the returned payment on-chain with the user's wallet
+(e.g. via WalletConnect), then `finalizeUpload`. The full three-step flow,
+calldata shapes, and the `IPaymentVault` ABI are documented in
+[`ant-sdk/docs/external-signer-flow.md`](https://github.com/WithAutonomi/ant-sdk/blob/main/docs/external-signer-flow.md).
+See [`ant-mobile-android`](https://github.com/WithAutonomi/ant-mobile-android)
+for a complete working reference (WalletConnect wiring, both wave and merkle
+payment paths, live progress).
+
+> Note: the SDK models uniffi `suspend fn`s with kotlinx-coroutines. For
+> `Dispatchers.Main` in a UI app you may also want
+> `implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:…")`, which
+> is not transitive from the SDK.
+
+## Parameter reference
+
+- **`paymentMode`** (`dataPutPublic` / `dataPutPrivate` / `fileUploadPublic`):
+  `"auto"` (default — picks the cheapest batching for the size), `"single"`,
+  or `"merkle"`.
+- **`visibility`** (`prepareDataUpload` / `prepareFileUpload`): `"public"`
+  (retrieve by address) or `"private"` (retrieve with the hex data map you keep).
+- **Addresses & data maps** are hex strings. Chunk/data payloads cross the FFI
+  as `ByteArray`.
 
 ## Versioning
 
 Releases are cut in lockstep with [`ant-sdk`](https://github.com/WithAutonomi/ant-sdk):
-a tag `vX.Y.Z` in `ant-sdk` triggers a matching `vX.Y.Z` release here.
+a tag `vX.Y.Z` in `ant-sdk` triggers a matching `vX.Y.Z` release here, published
+to [`ant-maven`](https://github.com/WithAutonomi/ant-maven).
 
 ## License
 
