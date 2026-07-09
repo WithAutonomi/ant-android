@@ -29,10 +29,10 @@ android {
 }
 
 dependencies {
-    // Snippet from the ant-android README.
-    implementation(files("libs/ant-android-release.aar"))
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    // Published Autonomi SDK from the ant-maven Pages repo (JNA + coroutines-core
+    // + kotlin-stdlib come transitively via its POM).
+    implementation("com.autonomi:ant-android:0.0.7")
+    // coroutines-android (Dispatchers.Main) is not transitive from the SDK.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Compose UI.
