@@ -29,7 +29,7 @@ In your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.autonomi:ant-android:0.0.3")
+    implementation("com.autonomi:ant-android:0.0.7")
     // JNA (to call into libant_ffi.so) and kotlinx-coroutines-core are
     // pulled in transitively from the POM — no need to declare them.
 }
@@ -101,6 +101,39 @@ val back = client.dataGetPublic(pub.address)
 val priv = client.dataPutPrivate(payload, "auto")
 val secret = client.dataGetPrivate(priv.dataMap)
 ```
+
+### Upload a file from disk (recommended for large data)
+
+For anything larger than a small blob, upload **from a file path** rather than
+loading bytes into memory. `ant-core` streams the file through self-encryption
+and spills chunks to disk, so memory stays flat regardless of file size — the
+in-memory `dataPut*` / `chunkPut` APIs hold the whole payload in RAM.
+
+```kotlin
+// Preview the cost before paying (sampled — fast, confidence-aware).
+val est = client.estimateFileCost(path, "auto")
+println("${est.chunkCount} chunks · ~${est.storageCostAtto} atto ANT · ${est.confidence}")
+
+// Public: retrievable by address.
+val put = client.fileUploadPublic(path, "auto")
+
+// Private: keep the returned hex data map — it's the only way back in.
+val priv = client.fileUploadPrivate(path, "auto")
+
+// Download straight to disk (streams; ProgressListener is required).
+val noop = object : ProgressListener { override fun onProgress(update: ProgressUpdate) {} }
+val bytes = client.downloadPublicToFile(put.address, outPath, noop)
+```
+
+`CostEstimate` fields: `fileSize`, `chunkCount`, `storageCostAtto` (storage in
+atto-ANT), `estimatedGasCostWei`, `paymentMode`, and `confidence` — a string
+(`priced_sample`, `verified_all_already_stored`, …) telling you how firm the
+estimate is, so you don't render a best-effort `0` as "free".
+
+> **Memory model.** File uploads and `download*ToFile` **stream** (constant
+> memory). The `dataPut*` / `dataGet*` / `chunk*` APIs load the full payload
+> into a `ByteArray` — fine for small data, avoid for large. Prefer the
+> file-path APIs on mobile.
 
 ### Error handling
 
