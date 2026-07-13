@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Published Autonomi SDK (ant-android) — GitHub Pages Maven repo.
+        maven("https://withautonomi.github.io/ant-maven/")
     }
 }
 rootProject.name = "AntAndroidDemo"
