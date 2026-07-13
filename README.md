@@ -151,14 +151,25 @@ try {
 
 ### Paying with the user's own wallet (external signer)
 
-`connectForExternalSigner` never holds a key. You `prepareDataUpload` /
-`prepareFileUpload`, sign the returned payment on-chain with the user's wallet
-(e.g. via WalletConnect), then `finalizeUpload`. The full three-step flow,
-calldata shapes, and the `IPaymentVault` ABI are documented in
-[`ant-sdk/docs/external-signer-flow.md`](https://github.com/WithAutonomi/ant-sdk/blob/main/docs/external-signer-flow.md).
+`connectForExternalSigner` never holds a key. The flow is: `prepareFileUpload`
+→ `paymentTransactions(uploadId)` (the SDK returns the ready-to-sign `approve` +
+`pay` transactions — you never build calldata) → sign each with the user's
+wallet and `waitForReceipt` → `finalizeUpload` (wave) or `finalizeUploadMerkle`
+(merkle). All ABI encoding, receipt polling, and the merkle-winner lookup live
+in the SDK. Note `waitForReceipt` / `merkleWinnerPoolHash` / `networkInfo` are
+free functions (`import uniffi.ant_ffi.*`); only `paymentTransactions` /
+`prepare*` / `finalize*` are `Client` methods.
+
+The full step-by-step flow, with Kotlin **and** Swift worked examples, wave vs
+merkle routing, and the paid-but-not-stored retry contract, is documented in
+[`ant-sdk/docs/mobile-external-signer.md`](https://github.com/WithAutonomi/ant-sdk/blob/main/docs/mobile-external-signer.md).
 See [`ant-mobile-android`](https://github.com/WithAutonomi/ant-mobile-android)
-for a complete working reference (WalletConnect wiring, both wave and merkle
-payment paths, live progress).
+for a complete working reference (WalletConnect wiring, both payment paths, live
+progress).
+
+> The older [`external-signer-flow.md`](https://github.com/WithAutonomi/ant-sdk/blob/main/docs/external-signer-flow.md)
+> describes the **antd daemon REST** flow (HTTP endpoints, hand-rolled ABI) — it
+> does **not** apply to this mobile SDK. Use the mobile doc above.
 
 > Note: the SDK models uniffi `suspend fn`s with kotlinx-coroutines. For
 > `Dispatchers.Main` in a UI app you may also want
