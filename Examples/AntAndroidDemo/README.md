@@ -53,13 +53,21 @@ adb push "$HOME/Library/Application Support/ant/devnet-manifest.json" \
    /data/local/tmp/devnet-manifest.json
 ```
 
-- **Physical device on the same LAN (recommended):** point the devnet at the
-  host's LAN IP (e.g. run the devnet with `ant-devnet --host <ip>`, see
-  [`ant-lan-devnet`](https://github.com/Nic-dorman/ant-lan-devnet)) and push that
-  manifest. Cross-device LAN devnet works with the released SDK (≥ 0.0.7): the
-  SDK's `connectFromDevnetManifest*` auto-detects a LAN vs loopback manifest and
-  binds `0.0.0.0` when a non-loopback bootstrap addr is present — **no upstream
-  ant-node change needed**.
+- **Physical device on the same LAN (recommended):** run a devnet that
+  advertises the host's LAN IP with the `ant-devnet` harness in
+  [`ant-node`](https://github.com/WithAutonomi/ant-node) (≥ v0.14.4; run from a
+  source checkout — it is not in the release tarballs):
+
+  ```sh
+  cargo run --release --bin ant-devnet -- --preset small --enable-evm \
+    --host <lan-ip> \
+    --manifest "$HOME/Library/Application Support/ant/devnet-manifest.json"
+  ```
+
+  then push that manifest (adb command above). Cross-device LAN devnet works
+  with the released SDK (≥ 0.0.7): the SDK's `connectFromDevnetManifest*`
+  auto-detects a LAN vs loopback manifest and binds `0.0.0.0` when a
+  non-loopback bootstrap addr is present.
 - **Emulator:** `127.0.0.1` inside the emulator is the emulator, not the host,
   and its NAT does not reliably reach loopback-bound devnet services — prefer a
   physical device on the LAN.
