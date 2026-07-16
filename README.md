@@ -188,9 +188,15 @@ progress).
 
 ## Versioning
 
-Releases are cut in lockstep with [`ant-sdk`](https://github.com/WithAutonomi/ant-sdk):
-a tag `vX.Y.Z` in `ant-sdk` triggers a matching `vX.Y.Z` release here, published
-to [`ant-maven`](https://github.com/WithAutonomi/ant-maven).
+Versions are built from [`ant-sdk`](https://github.com/WithAutonomi/ant-sdk)'s
+`ffi/` source and published to
+[`ant-maven`](https://github.com/WithAutonomi/ant-maven) (the Maven repository
+the install snippet above uses) via ant-maven's manual `publish-android`
+workflow. This repo hosts the source and generated bindings; **GitHub releases
+are not cut here** — published AARs and available versions live in ant-maven's
+[`maven-metadata.xml`](https://withautonomi.github.io/ant-maven/com/autonomi/ant-android/maven-metadata.xml).
+The iOS SDK ([`ant-swift`](https://github.com/WithAutonomi/ant-swift)) is
+released at the same version.
 
 ## License
 
