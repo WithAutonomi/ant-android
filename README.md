@@ -90,7 +90,8 @@ LibC.INSTANCE.setenv("HOME", context.filesDir.absolutePath, 1)
 
 From v0.0.8 the shim is no longer needed: every `connect*` method takes an
 optional `dataDir` argument — pass `context.filesDir.absolutePath` there
-instead.
+instead. (Running both during a migration is harmless — the SDK simply
+overwrites `HOME` with the `dataDir` value.)
 
 ## Usage
 
