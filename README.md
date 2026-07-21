@@ -65,6 +65,34 @@ pay for uploads:
 Every method is a `suspend fun` — call from a coroutine. A failure surfaces as
 a typed `ClientException`.
 
+## Android data directory (required)
+
+Android app processes have no `HOME` environment variable, and the SDK's
+native core derives its local state paths (bootstrap cache, config) from it.
+Without one, **every `connect*` call fails** with
+`ClientException.InitializationFailed` (`HomeDirNotFound`).
+
+On v0.0.7, plant it once before the first connect call — libc `setenv` via
+JNA, exactly what the demo apps do in `AntFfiBootstrap.kt`:
+
+```kotlin
+import com.sun.jna.Library
+import com.sun.jna.Native
+
+internal interface LibC : Library {
+    fun setenv(name: String, value: String, overwrite: Int): Int
+    companion object { val INSTANCE: LibC = Native.load("c", LibC::class.java) }
+}
+
+// Once, before the first connect call (e.g. in Application.onCreate):
+LibC.INSTANCE.setenv("HOME", context.filesDir.absolutePath, 1)
+```
+
+From v0.0.8 the shim is no longer needed: every `connect*` method takes an
+optional `dataDir` argument — pass `context.filesDir.absolutePath` there
+instead. (Running both during a migration is harmless — the SDK simply
+overwrites `HOME` with the `dataDir` value.)
+
 ## Usage
 
 ### Store and retrieve a chunk (local devnet)
